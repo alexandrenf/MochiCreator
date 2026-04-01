@@ -1,10 +1,17 @@
-app = "mochi-mcp"
-primary_region = "gru"
+# fly.toml app configuration file generated for mochi-mcp on 2026-04-01T15:23:07-03:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'mochi-mcp'
+primary_region = 'gru'
 
 [build]
 
 [env]
-  PORT = "8080"
+  CLAUDEREMINDERS_URL = 'https://claudereminders.fly.dev'
+  PORT = '8080'
+  TZ = 'America/Sao_Paulo'
 
 [http_service]
   internal_port = 8080
@@ -14,11 +21,15 @@ primary_region = "gru"
   min_machines_running = 1
 
   [http_service.concurrency]
-    type = "connections"
+    type = 'connections'
     hard_limit = 25
     soft_limit = 20
 
+[[restart]]
+  policy = 'always'
+
 [[vm]]
-  memory = "256mb"
-  cpu_kind = "shared"
+  memory = '256mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256

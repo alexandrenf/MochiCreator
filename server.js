@@ -13,6 +13,8 @@ import { z } from "zod";
 const MOCHI_API_KEY = process.env.MOCHI_API_KEY;
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const PORT = parseInt(process.env.PORT ?? "8080", 10);
+const CLAUDEREMINDERS_URL = process.env.CLAUDEREMINDERS_URL ?? "https://claudereminders.fly.dev";
+const CLAUDEREMINDERS_NOTIFY_TOKEN = process.env.CLAUDEREMINDERS_NOTIFY_TOKEN;
 
 if (!MOCHI_API_KEY) {
   console.error("MOCHI_API_KEY environment variable is not set");
@@ -534,6 +536,68 @@ app.post("/messages", requireAuth, async (req, res) => {
   }
   await transport.handlePostMessage(req, res);
 });
+
+// ---------------------------------------------------------------------------
+// Background tasks
+// ---------------------------------------------------------------------------
+
+// Ping ClaudeReminders every 10 minutes to keep both machines warm and detect outages.
+// TZ is set to America/Sao_Paulo in fly.toml so new Date() reflects local time.
+setInterval(async () => {
+  try {
+    const res = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
+    console.log(`[${new Date().toISOString()}] ClaudeReminders health: ${res.data?.status ?? "unknown"}`);
+  } catch (e) {
+    console.error(`[${new Date().toISOString()}] ClaudeReminders health check failed: ${e.message}`);
+  }
+}, 10 * 60 * 1000);
+
+// Send a Pushover reminder via ClaudeReminders when there are due cards.
+async function notifyDueCards() {
+  try {
+    const result = await mochi.getDueCards();
+    const count = result.cards?.length ?? 0;
+    if (count === 0) {
+      console.log(`[${new Date().toISOString()}] Due cards check: nothing due.`);
+      return;
+    }
+    if (!CLAUDEREMINDERS_NOTIFY_TOKEN) {
+      console.warn(`[${new Date().toISOString()}] CLAUDEREMINDERS_NOTIFY_TOKEN not set — skipping notification.`);
+      return;
+    }
+    await axios.post(
+      `${CLAUDEREMINDERS_URL}/notify`,
+      {
+        title: "Mochi — Revisões pendentes",
+        message: `Você tem ${count} card${count > 1 ? "s" : ""} para revisar.`,
+      },
+      {
+        headers: { Authorization: `Bearer ${CLAUDEREMINDERS_NOTIFY_TOKEN}` },
+        timeout: 10000,
+      }
+    );
+    console.log(`[${new Date().toISOString()}] Due cards reminder sent: ${count} cards.`);
+  } catch (e) {
+    console.error(`[${new Date().toISOString()}] Due cards notification failed: ${e.message}`);
+  }
+}
+
+// Check every minute whether it's one of the reminder hours (local São Paulo time).
+// Hours: 6:00, 12:00, 18:00, 20:00
+const REMINDER_HOURS = new Set([6, 12, 18, 20]);
+let lastReminderHour = -1;
+
+setInterval(() => {
+  const now = new Date();
+  const hour = now.getHours();   // valid because TZ=America/Sao_Paulo is set in fly.toml
+  const minute = now.getMinutes();
+  if (minute === 0 && REMINDER_HOURS.has(hour) && hour !== lastReminderHour) {
+    lastReminderHour = hour;
+    notifyDueCards();
+  }
+  // Reset so the same hour can fire again tomorrow
+  if (minute > 1) lastReminderHour = -1;
+}, 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Mochi MCP server listening on port ${PORT}`);
