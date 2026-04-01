@@ -3,8 +3,10 @@ import "dotenv/config";
 import express from "express";
 import axios from "axios";
 import FormData from "form-data";
+import { randomUUID } from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -223,10 +225,8 @@ class MochiClient {
 const mochi = new MochiClient(MOCHI_API_KEY);
 
 // ---------------------------------------------------------------------------
-// MCP server + tools
+// Tool response helpers
 // ---------------------------------------------------------------------------
-const server = new McpServer({ name: "mochi-mcp", version: "1.0.0" });
-
 function toolError(error) {
   if (error instanceof z.ZodError) {
     const msgs = error.issues.map((i) => {
@@ -244,6 +244,12 @@ function toolError(error) {
 function ok(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
+
+// ---------------------------------------------------------------------------
+// MCP server factory — creates one McpServer per session
+// ---------------------------------------------------------------------------
+function createMcpServer() {
+  const server = new McpServer({ name: "mochicreator", version: "1.0.0" });
 
 // list_decks
 server.registerTool(
@@ -498,48 +504,83 @@ server.registerTool(
   }
 );
 
+  return server;
+}
+
 // ---------------------------------------------------------------------------
-// Express app + auth middleware
+// Express app
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json());
 
-function requireAuth(req, res, next) {
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
+
+// Active Streamable HTTP transports keyed by sessionId
+const sessions = new Map();
+
+function isAuthorized(req) {
   const bearer = req.headers.authorization ?? "";
   const queryToken = req.query.token ?? "";
-  if (bearer !== `Bearer ${MCP_AUTH_TOKEN}` && queryToken !== MCP_AUTH_TOKEN) {
+  return bearer === `Bearer ${MCP_AUTH_TOKEN}` || queryToken === MCP_AUTH_TOKEN;
+}
+
+// POST /mcp — handles both new session init and subsequent requests
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+
+  if (sessionId) {
+    // Existing session — session ID is implicit auth
+    const transport = sessions.get(sessionId);
+    if (!transport) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    await transport.handleRequest(req, res, req.body);
+    return;
+  }
+
+  // New session — must be an initialize request with valid auth
+  if (!isInitializeRequest(req.body)) {
+    res.status(400).json({ error: "Expected initialize request for new session" });
+    return;
+  }
+  if (!isAuthorized(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  next();
-}
 
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
-
-// Active SSE transports keyed by sessionId
-const transports = {};
-
-app.get("/sse", requireAuth, async (req, res) => {
-  const queryToken = req.query.token;
-  const messagesPath = queryToken
-    ? `/messages?token=${encodeURIComponent(queryToken)}`
-    : "/messages";
-  const transport = new SSEServerTransport(messagesPath, res);
-  transports[transport.sessionId] = transport;
-  res.on("close", () => {
-    delete transports[transport.sessionId];
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (id) => { sessions.set(id, transport); },
   });
-  await server.connect(transport);
+  transport.onclose = () => {
+    if (transport.sessionId) sessions.delete(transport.sessionId);
+  };
+
+  const mcpServer = createMcpServer();
+  await mcpServer.connect(transport);
+  await transport.handleRequest(req, res, req.body);
 });
 
-app.post("/messages", requireAuth, async (req, res) => {
-  const { sessionId } = req.query;
-  const transport = transports[sessionId];
+// GET /mcp — SSE stream for server-to-client notifications
+app.get("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  const transport = sessions.get(sessionId);
   if (!transport) {
     res.status(404).json({ error: "Session not found" });
     return;
   }
-  await transport.handlePostMessage(req, res);
+  await transport.handleRequest(req, res);
+});
+
+// DELETE /mcp — explicit session teardown
+app.delete("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  if (sessionId && sessions.has(sessionId)) {
+    await sessions.get(sessionId).close();
+    sessions.delete(sessionId);
+  }
+  res.status(200).end();
 });
 
 // ---------------------------------------------------------------------------
