@@ -505,8 +505,9 @@ const app = express();
 app.use(express.json());
 
 function requireAuth(req, res, next) {
-  const auth = req.headers.authorization ?? "";
-  if (auth !== `Bearer ${MCP_AUTH_TOKEN}`) {
+  const bearer = req.headers.authorization ?? "";
+  const queryToken = req.query.token ?? "";
+  if (bearer !== `Bearer ${MCP_AUTH_TOKEN}` && queryToken !== MCP_AUTH_TOKEN) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
