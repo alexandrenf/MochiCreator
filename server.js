@@ -520,7 +520,11 @@ app.get("/health", (_req, res) => res.json({ status: "ok" }));
 const transports = {};
 
 app.get("/sse", requireAuth, async (req, res) => {
-  const transport = new SSEServerTransport("/messages", res);
+  const queryToken = req.query.token;
+  const messagesPath = queryToken
+    ? `/messages?token=${encodeURIComponent(queryToken)}`
+    : "/messages";
+  const transport = new SSEServerTransport(messagesPath, res);
   transports[transport.sessionId] = transport;
   res.on("close", () => {
     delete transports[transport.sessionId];
