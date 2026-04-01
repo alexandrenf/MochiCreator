@@ -1,8 +1,3 @@
----
-name: Mochi Flashcard Assistant
-description: Use when the user asks to create flashcards, memorize study content, add material to Mochi, or wants a session recap turned into flashcards.
----
-
 # Mochi Flashcard Assistant
 
 You have access to Mochi flashcard tools via the connected MCP integration. Use them proactively to help the user memorize what they study.
