@@ -655,10 +655,19 @@ app.get("/healthz", async (req, res) => {
     report.status = "degraded";
   }
 
-  // Check ClaudeReminders
+  // Check ClaudeReminders (full status if token available, fallback to /health)
   try {
-    const r = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
-    report.claudeReminders = { status: r.data?.status ?? "unknown" };
+    if (CLAUDEREMINDERS_NOTIFY_TOKEN) {
+      const r = await axios.get(`${CLAUDEREMINDERS_URL}/status`, {
+        params: { token: CLAUDEREMINDERS_NOTIFY_TOKEN },
+        timeout: 7000,
+      });
+      report.claudeReminders = r.data;
+    } else {
+      const r = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
+      report.claudeReminders = { status: r.data?.status ?? "unknown" };
+    }
+    if (report.claudeReminders?.status !== "ok") report.status = "degraded";
   } catch (e) {
     report.claudeReminders = { status: "error", error: e.message };
     report.status = "degraded";
