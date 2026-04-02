@@ -584,66 +584,109 @@ app.delete("/mcp", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Notification state
+// ---------------------------------------------------------------------------
+const NOTIFY_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
+const QUIET_START_HOUR = 22; // 10pm SP — no notifications
+const QUIET_END_HOUR = 6;    // 6am SP — notifications resume
+let lastNotifiedAt = 0;      // epoch ms, 0 = never notified
+
+function isQuietHour() {
+  const hour = new Date().getHours(); // SP time via TZ=America/Sao_Paulo in fly.toml
+  return hour >= QUIET_START_HOUR || hour < QUIET_END_HOUR;
+}
+
+// Returns a result object describing what happened. Never throws.
+async function checkAndNotify() {
+  if (isQuietHour()) {
+    return { skipped: "quiet hours (22:00–06:00)" };
+  }
+  const cooldownRemaining = NOTIFY_COOLDOWN_MS - (Date.now() - lastNotifiedAt);
+  if (cooldownRemaining > 0) {
+    return { skipped: `cooldown (${Math.ceil(cooldownRemaining / 60000)} min remaining)` };
+  }
+  if (!CLAUDEREMINDERS_NOTIFY_TOKEN) {
+    return { skipped: "CLAUDEREMINDERS_NOTIFY_TOKEN not set" };
+  }
+
+  const result = await mochi.getDueCards();
+  const count = result.cards?.length ?? 0;
+  if (count === 0) return { notified: false, due: 0 };
+
+  await axios.post(
+    `${CLAUDEREMINDERS_URL}/notify`,
+    {
+      title: "Mochi — Revisões pendentes",
+      message: `Você tem ${count} card${count > 1 ? "s" : ""} para revisar.`,
+    },
+    { headers: { Authorization: `Bearer ${CLAUDEREMINDERS_NOTIFY_TOKEN}` }, timeout: 10000 }
+  );
+  lastNotifiedAt = Date.now();
+  console.log(`[${new Date().toISOString()}] Due cards reminder sent: ${count} cards.`);
+  return { notified: true, due: count };
+}
+
+// ---------------------------------------------------------------------------
+// Health check endpoint — designed for UptimeRobot monitoring
+// Requires ?token=MCP_AUTH_TOKEN (or Bearer header).
+// On each call: checks Mochi API, MCP sessions, and runs the notification gate.
+// ---------------------------------------------------------------------------
+app.get("/healthz", async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const report = {
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    mcp: { activeSessions: sessions.size },
+    mochi: null,
+    notification: null,
+    claudeReminders: null,
+  };
+
+  // Check Mochi API
+  try {
+    const decks = await mochi.listDecks();
+    report.mochi = { status: "ok", deckCount: decks.docs?.length ?? 0 };
+  } catch (e) {
+    report.mochi = { status: "error", error: e.message };
+    report.status = "degraded";
+  }
+
+  // Check ClaudeReminders
+  try {
+    const r = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
+    report.claudeReminders = { status: r.data?.status ?? "unknown" };
+  } catch (e) {
+    report.claudeReminders = { status: "error", error: e.message };
+    report.status = "degraded";
+  }
+
+  // Notification gate
+  try {
+    report.notification = await checkAndNotify();
+  } catch (e) {
+    report.notification = { error: e.message };
+  }
+
+  res.status(report.status === "ok" ? 200 : 207).json(report);
+});
+
+// ---------------------------------------------------------------------------
 // Background tasks
 // ---------------------------------------------------------------------------
 
-// Ping ClaudeReminders every 10 minutes to keep both machines warm and detect outages.
-// TZ is set to America/Sao_Paulo in fly.toml so new Date() reflects local time.
+// Keep ClaudeReminders warm every 10 minutes (separate from the healthz check).
 setInterval(async () => {
   try {
-    const res = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
-    console.log(`[${new Date().toISOString()}] ClaudeReminders health: ${res.data?.status ?? "unknown"}`);
+    const r = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
+    console.log(`[${new Date().toISOString()}] ClaudeReminders ping: ${r.data?.status ?? "unknown"}`);
   } catch (e) {
-    console.error(`[${new Date().toISOString()}] ClaudeReminders health check failed: ${e.message}`);
+    console.error(`[${new Date().toISOString()}] ClaudeReminders ping failed: ${e.message}`);
   }
 }, 10 * 60 * 1000);
-
-// Send a Pushover reminder via ClaudeReminders when there are due cards.
-async function notifyDueCards() {
-  try {
-    const result = await mochi.getDueCards();
-    const count = result.cards?.length ?? 0;
-    if (count === 0) {
-      console.log(`[${new Date().toISOString()}] Due cards check: nothing due.`);
-      return;
-    }
-    if (!CLAUDEREMINDERS_NOTIFY_TOKEN) {
-      console.warn(`[${new Date().toISOString()}] CLAUDEREMINDERS_NOTIFY_TOKEN not set — skipping notification.`);
-      return;
-    }
-    await axios.post(
-      `${CLAUDEREMINDERS_URL}/notify`,
-      {
-        title: "Mochi — Revisões pendentes",
-        message: `Você tem ${count} card${count > 1 ? "s" : ""} para revisar.`,
-      },
-      {
-        headers: { Authorization: `Bearer ${CLAUDEREMINDERS_NOTIFY_TOKEN}` },
-        timeout: 10000,
-      }
-    );
-    console.log(`[${new Date().toISOString()}] Due cards reminder sent: ${count} cards.`);
-  } catch (e) {
-    console.error(`[${new Date().toISOString()}] Due cards notification failed: ${e.message}`);
-  }
-}
-
-// Check every minute whether it's one of the reminder hours (local São Paulo time).
-// Hours: 6:00, 12:00, 18:00, 20:00
-const REMINDER_HOURS = new Set([6, 12, 18, 20]);
-let lastReminderHour = -1;
-
-setInterval(() => {
-  const now = new Date();
-  const hour = now.getHours();   // valid because TZ=America/Sao_Paulo is set in fly.toml
-  const minute = now.getMinutes();
-  if (minute === 0 && REMINDER_HOURS.has(hour) && hour !== lastReminderHour) {
-    lastReminderHour = hour;
-    notifyDueCards();
-  }
-  // Reset so the same hour can fire again tomorrow
-  if (minute > 1) lastReminderHour = -1;
-}, 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Mochi MCP server listening on port ${PORT}`);
