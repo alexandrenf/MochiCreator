@@ -651,8 +651,8 @@ app.get("/healthz", async (req, res) => {
     const decks = await mochi.listDecks();
     report.mochi = { status: "ok", deckCount: decks.docs?.length ?? 0 };
   } catch (e) {
-    report.mochi = { status: "error", error: e.message };
-    report.status = "degraded";
+    report.mochi = { status: "down", error: e.message };
+    report.status = "down";
   }
 
   // Check ClaudeReminders (full status if token available, fallback to /health)
@@ -667,20 +667,20 @@ app.get("/healthz", async (req, res) => {
       const r = await axios.get(`${CLAUDEREMINDERS_URL}/health`, { timeout: 5000 });
       report.claudeReminders = { status: r.data?.status ?? "unknown" };
     }
-    if (report.claudeReminders?.status !== "ok") report.status = "degraded";
+    if (report.claudeReminders?.status !== "ok") report.status = "down";
   } catch (e) {
-    report.claudeReminders = { status: "error", error: e.message };
-    report.status = "degraded";
+    report.claudeReminders = { status: "down", error: e.message };
+    report.status = "down";
   }
 
-  // Notification gate
+  // Notification gate (best-effort, never blocks the response)
   try {
     report.notification = await checkAndNotify();
   } catch (e) {
     report.notification = { error: e.message };
   }
 
-  res.status(report.status === "ok" ? 200 : 207).json(report);
+  res.json(report);
 });
 
 // ---------------------------------------------------------------------------
