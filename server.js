@@ -75,11 +75,12 @@ class MochiClient {
     );
   }
 
-  async createCard({ content, deckId, templateId = null, tags, attachments }) {
+  async createCard({ content, deckId, name, templateId = null, tags, attachments }) {
     const body = {
       content,
       "deck-id": deckId,
       "template-id": templateId,
+      ...(name ? { name } : {}),
       "manual-tags": tags,
     };
     const res = await this.api.post("/cards", body);
@@ -93,13 +94,12 @@ class MochiClient {
     return card;
   }
 
-  async updateCard(cardId, { content, deckId, templateId, archived, trashed, fields }) {
+  async updateCard(cardId, { content, deckId, templateId, archived, fields }) {
     const body = {};
     if (content !== undefined) body.content = content;
     if (deckId !== undefined) body["deck-id"] = deckId;
     if (templateId !== undefined) body["template-id"] = templateId;
     if (archived !== undefined) body["archived?"] = archived;
-    if (trashed !== undefined) body["trashed?"] = trashed;
     if (fields !== undefined) body.fields = fields;
     const res = await this.api.post(`/cards/${cardId}`, body);
     return res.data;
@@ -194,6 +194,60 @@ class MochiClient {
     return res.data;
   }
 
+  async getCard(cardId) {
+    const res = await this.api.get(`/cards/${cardId}`);
+    return res.data;
+  }
+
+  async getDeckStats(deckId) {
+    let total = 0;
+    let bookmark = undefined;
+    do {
+      const result = await this.listCards({ deckId, limit: 100, bookmark });
+      const docs = result.docs ?? [];
+      total += docs.length;
+      bookmark = docs.length === 100 ? result.bookmark : undefined;
+    } while (bookmark);
+
+    const dueResult = await this.getDueCards({ deckId });
+    const due = dueResult.cards?.length ?? 0;
+
+    return { total, due };
+  }
+
+  async searchCards(deckId, keyword) {
+    const matches = [];
+    let bookmark = undefined;
+    const kw = keyword.toLowerCase();
+    do {
+      const result = await this.listCards({ deckId, limit: 100, bookmark });
+      const docs = result.docs ?? [];
+      for (const doc of docs) {
+        const name = (doc.name ?? "").toLowerCase();
+        const content = (doc.content ?? "").toLowerCase();
+        if (name.includes(kw) || content.includes(kw)) {
+          matches.push({ id: doc.id, name: doc.name, content: doc.content });
+        }
+      }
+      bookmark = docs.length === 100 ? result.bookmark : undefined;
+    } while (bookmark);
+    return matches;
+  }
+
+  async createCardsBatch(cards) {
+    const created = [];
+    const failed = [];
+    for (const card of cards) {
+      try {
+        const result = await this.createCard(card);
+        created.push({ index: cards.indexOf(card), name: card.name, id: result.id });
+      } catch (e) {
+        failed.push({ index: cards.indexOf(card), name: card.name, error: e instanceof MochiError ? e.message : String(e) });
+      }
+    }
+    return { created, failed, total: cards.length };
+  }
+
   async addAttachment({ cardId, filename, data, contentType }) {
     if (!contentType) {
       const ext = filename.split(".").pop()?.toLowerCase() ?? "";
@@ -256,12 +310,12 @@ server.registerTool(
   "list_decks",
   {
     title: "List Mochi decks",
-    description: "List all non-archived, non-trashed decks. Use this to find the right deckId before creating cards. The response includes parent-id for subdecks.",
+    description: "List all non-archived, non-trashed decks. Use this to find the right deckId before creating cards. The response includes parent-id for subdecks. Call with no arguments or an empty object on the first page.",
     inputSchema: z.object({
-      bookmark: z.string().optional().describe("Pagination bookmark"),
+      bookmark: z.string().optional().describe("Pagination cursor from a previous response. Omit for the first page."),
     }),
   },
-  async (args) => {
+  async (args = {}) => {
     try {
       return ok(await mochi.listDecks(args));
     } catch (e) {
@@ -295,12 +349,13 @@ server.registerTool(
   "create_flashcard",
   {
     title: "Create Mochi flashcard",
-    description: "Create a new flashcard. Format content as: question text \\n---\\n answer text. The --- must be on its own line. Use list_decks to find deckId.",
+    description: "Create a new flashcard. Supported formats: (1) Simple cloze: 'Term is {{answer}}.'; (2) Indexed cloze for comparisons: '{{1::X}} vs {{2::Y}}'; (3) Front/back: 'Question?\\n\\n---\\n\\nAnswer'. Always include a name (short title for searchability). Use list_decks to find deckId.",
     inputSchema: z.object({
-      content: z.string().min(1).describe("Markdown content: question\\n---\\nanswer"),
-      deckId: z.string().min(1).describe("ID of the target deck"),
+      name: z.string().min(1).describe("Short card title for searchability, e.g. 'Metformina - classe'"),
+      content: z.string().min(1).describe("Mochi markdown: cloze {{term}}, indexed {{1::X}} {{2::Y}}, or front/back separated by \\n\\n---\\n\\n"),
+      deckId: z.string().min(1).describe("ID of the target deck from list_decks"),
       templateId: z.string().optional().nullable().describe("Optional template ID"),
-      tags: z.array(z.string()).optional().describe("Tags for the card"),
+      tags: z.array(z.string()).optional().describe("Tags, e.g. ['#needs-visual']"),
       attachments: z.record(z.string(), z.string()).optional().describe("Map of filename to base64 data for images/audio"),
     }),
   },
@@ -341,14 +396,13 @@ server.registerTool(
   "update_flashcard",
   {
     title: "Update Mochi flashcard",
-    description: "Update an existing flashcard's content, deck, template, or fields. Only provided fields are updated.",
+    description: "Update an existing flashcard's content, deck, template, or fields. Only provided fields are updated. To remove a card use delete_flashcard — soft-delete (trashed) is not supported by the Mochi API.",
     inputSchema: z.object({
       cardId: z.string().describe("ID of the card to update"),
       content: z.string().optional().describe("New markdown content"),
       deckId: z.string().optional().describe("Move card to this deck"),
       templateId: z.string().optional(),
       fields: z.record(z.string(), z.object({ id: z.string(), value: z.string() })).optional(),
-      trashed: z.boolean().optional().describe("true to soft-delete, false to restore"),
     }),
   },
   async ({ cardId, ...rest }) => {
@@ -365,7 +419,7 @@ server.registerTool(
   "delete_flashcard",
   {
     title: "Delete Mochi flashcard",
-    description: "Permanently delete a flashcard. This cannot be undone. Prefer trashing (update_flashcard with trashed:true) when in doubt.",
+    description: "Permanently delete a flashcard. This cannot be undone.",
     inputSchema: z.object({
       cardId: z.string().describe("ID of the card to permanently delete"),
     }),
@@ -422,24 +476,29 @@ server.registerTool(
   }
 );
 
-// search_deck_cards  (lightweight duplicate check — max 50 cards)
+// search_deck_cards — keyword search with full pagination
 server.registerTool(
   "search_deck_cards",
   {
-    title: "Search cards in deck (duplicate check)",
-    description: "Fetch up to 50 cards from a deck to check for duplicates before creating. Returns an empty list if the deck has more than 50 cards to avoid excessive token usage.",
+    title: "Search cards in deck",
+    description: "Search cards in a deck by keyword (matches card name and content, case-insensitive, paginates through all cards). Use for duplicate detection before creating cards or finding a card to edit. Without keyword, returns the first page of cards with a note if the deck is larger.",
     inputSchema: z.object({
       deckId: z.string().min(1).describe("Deck ID to search in"),
+      keyword: z.string().optional().describe("Keyword to filter by (case-insensitive, matches name and content). Omit to browse the first page."),
     }),
   },
-  async ({ deckId }) => {
+  async ({ deckId, keyword }) => {
     try {
+      if (keyword) {
+        const matches = await mochi.searchCards(deckId, keyword);
+        return ok({ matches, count: matches.length });
+      }
       const result = await mochi.listCards({ deckId, limit: 50 });
       const docs = result.docs ?? [];
-      if (result.bookmark && docs.length === 50) {
-        return ok({ note: "Deck has >50 cards — duplicate check skipped to save usage.", docs: [] });
-      }
-      return ok({ docs });
+      const note = result.bookmark && docs.length === 50
+        ? "Deck has >50 cards — use keyword parameter to search across all cards."
+        : undefined;
+      return ok({ docs, ...(note ? { note } : {}) });
     } catch (e) {
       return toolError(e);
     }
@@ -498,6 +557,71 @@ server.registerTool(
   async (args) => {
     try {
       return ok(await mochi.getDueCards(args));
+    } catch (e) {
+      return toolError(e);
+    }
+  }
+);
+
+// get_flashcard
+server.registerTool(
+  "get_flashcard",
+  {
+    title: "Get Mochi flashcard by ID",
+    description: "Fetch a single flashcard by ID to read its current content and fields. Use this before editing to verify content, or after creating to confirm the result.",
+    inputSchema: z.object({
+      cardId: z.string().min(1).describe("Card ID to retrieve"),
+    }),
+  },
+  async ({ cardId }) => {
+    try {
+      return ok(await mochi.getCard(cardId));
+    } catch (e) {
+      return toolError(e);
+    }
+  }
+);
+
+// get_deck_stats
+server.registerTool(
+  "get_deck_stats",
+  {
+    title: "Get deck statistics",
+    description: "Get total card count and due-today count for a deck in one call. Useful at study session start to surface pending reviews before creating new cards.",
+    inputSchema: z.object({
+      deckId: z.string().min(1).describe("Deck ID to get stats for"),
+    }),
+  },
+  async ({ deckId }) => {
+    try {
+      return ok(await mochi.getDeckStats(deckId));
+    } catch (e) {
+      return toolError(e);
+    }
+  }
+);
+
+// create_flashcards_batch
+server.registerTool(
+  "create_flashcards_batch",
+  {
+    title: "Create multiple Mochi flashcards",
+    description: "Create up to 50 flashcards in a single call. Returns {created, failed, total} so partial failures are visible — if card 7 fails you know exactly which succeeded. Prefer this over multiple create_flashcard calls.",
+    inputSchema: z.object({
+      cards: z.array(
+        z.object({
+          name: z.string().min(1).describe("Short card title for searchability"),
+          content: z.string().min(1).describe("Mochi markdown content"),
+          deckId: z.string().min(1).describe("Target deck ID"),
+          templateId: z.string().optional().nullable().describe("Optional template ID"),
+          tags: z.array(z.string()).optional().describe("Tags e.g. ['#high-yield']"),
+        })
+      ).min(1).max(50).describe("Array of cards to create"),
+    }),
+  },
+  async ({ cards }) => {
+    try {
+      return ok(await mochi.createCardsBatch(cards));
     } catch (e) {
       return toolError(e);
     }
