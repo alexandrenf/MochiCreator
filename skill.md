@@ -12,6 +12,16 @@ You have access to Mochi flashcard tools via the connected MCP integration. Use 
 
 ---
 
+## Session start: check SRS context first
+
+When the user opens a study session or asks to create cards, call `get_deck_stats` on the target deck first (after finding it via `list_decks`). If `due > 0`, surface it before creating:
+
+> *"Você tem 23 revisões pendentes em ENAMED > Farmacologia. Quer revisar antes de adicionar novos cards?"*
+
+Don't block card creation if the user wants to proceed — just inform once.
+
+---
+
 ## Deck structure
 
 Organize hierarchically:
@@ -34,6 +44,15 @@ ENAMED (root)
 2. Find ENAMED root (case-insensitive)
 3. Find specialty subdeck by `parent-id`
 4. Create missing decks via `create_deck` before adding cards
+
+---
+
+## Duplicate check
+
+Before creating cards, check for duplicates using `search_deck_cards`:
+- Use `keyword` parameter matching the card topic (e.g., "metformina", "fibrilação")
+- If matches found, show them to the user and ask whether to skip, update, or create anyway
+- For decks with >50 cards, `search_deck_cards` without `keyword` will suggest using keyword search — always use a keyword for large decks
 
 ---
 
@@ -63,8 +82,8 @@ Contra-indicação renal absoluta da metformina: TFG < {{30}} mL/min.
 |-----------|--------|---------|
 | Single value/term | Simple cloze | `FA > {{3x}} o limite superior` |
 | Comparison (X vs Y) | Indexed cloze `{{1::X}} {{2::Y}}` | `{{1::CBP}}: mulheres; {{2::CEP}}: homens jovens + DII` |
-| Mechanism/explanation | Front/back `---` | `Como obstrução biliar causa icterícia? --- Obstrução → refluxo BD → sangue` |
-| Clinical scenario | Front/back | `45a, icterícia+prurido+AMA+. Dx? --- CBP` |
+| Mechanism/explanation | Front/back `---` | `Como obstrução biliar causa icterícia?\n\n---\n\nObstrução → refluxo BD → sangue` |
+| Clinical scenario | Front/back | `45a, icterícia+prurido+AMA+. Dx?\n\n---\n\nCBP` |
 | Lists/sets | **Avoid** or Mnemonic only | Never enumerate 3+ items in one card |
 
 **Critical:** Only use indexed clozes (`{{1::}} {{2::}}`) for **comparisons** (X vs Y), not sequential facts. Sequential indexed clozes cause context leakage (revealing one answer gives away the other).
@@ -98,6 +117,15 @@ Agranulocitose (~1%)
 💡 Hemograma semanal nas primeiras 18 semanas
 ```
 
+### 7. Tag taxonomy
+
+| Tag | Use for |
+|-----|---------|
+| `#needs-visual` | Placeholder cards requiring image occlusion |
+| `#high-yield` | Top-priority exam content |
+| `#formula` | Mathematical formulas, ratios, equations |
+| `#dose` | Drug dosing thresholds (weight-based, renal adjustment) |
+
 ---
 
 ## Preview workflow (max 12 cards)
@@ -113,7 +141,9 @@ Vou criar 7 flashcards em ENAMED > Gastroenterologia > Hepatopatias:
 
 2. [Mecanismo]
    Como a obstrução biliar causa icterícia?
+
    ---
+
    Obstrução do fluxo → acúmulo de BD → refluxo → icterícia
 
 3. [Comparação]
@@ -126,24 +156,45 @@ Vou criar 7 flashcards em ENAMED > Gastroenterologia > Hepatopatias:
 Criar todos? Editar/remover algum?
 ```
 
-Wait for explicit confirmation ("cria", "go", "manda") before `create_flashcard`.
+Wait for explicit confirmation ("cria", "go", "manda") before creating cards.
 
 ---
 
 ## Creating cards
 
-Call `create_flashcard` with:
+Use `create_flashcards_batch` for multiple cards (preferred over sequential `create_flashcard` calls). For a single card, `create_flashcard` is fine.
+
+Call with:
 
 - **name**: Card title (searchable)
 - **content**: Mochi-formatted markdown:
   - Simple cloze: `A metformina é {{biguanida}}.`
   - Indexed cloze: `{{1::CBP}} vs {{2::CEP}}` (comparisons only)
-  - Front/back: `Pergunta?\n\n---\n\nResposta`
+  - Front/back: `Pergunta?\n\n---\n\nResposta` (separator is always `\n\n---\n\n`)
   - LaTeX: `$\frac{LDH_{liq}}{LDH_{ser}}$`
   - HTML: `<span style="color:red">urgente</span>`
-- **deck-id**: Target deck from lookup
+- **deckId**: Target deck from lookup
 
-Create sequentially, confirm batch completion.
+### Error recovery
+
+`create_flashcards_batch` returns `{created, failed, total}`. If any cards fail:
+1. Report which succeeded and which failed (by name and index)
+2. Offer to retry the failed ones
+3. Never silently skip failures
+
+---
+
+## Editing cards
+
+When the user asks to fix, update, or change an existing card:
+
+1. Call `search_deck_cards` with a keyword matching the card topic
+2. Show the user the matching cards (name + content) and confirm which to edit
+3. Call `get_flashcard` with the confirmed ID to read the latest content
+4. Apply the change with `update_flashcard`
+5. Confirm the update to the user
+
+If the user knows the card ID directly, skip to step 3.
 
 ---
 
@@ -170,3 +221,4 @@ Match user's language. For Brazilian medical students: Portuguese terminology (e
 5. **Recognition vs recall** — "Metformina causa acidose lática? Sim" → Use cloze: `Efeito adverso grave da metformina: {{acidose lática}}`
 6. **Missing titles** — Cards without `name` field are unsearchable
 7. **Visual descriptions** — Don't describe ECG patterns in text; flag for manual image creation
+8. **Wrong separator** — Front/back separator is always `\n\n---\n\n` (with blank lines on both sides), never `\n---\n`
