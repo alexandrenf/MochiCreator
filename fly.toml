@@ -4,7 +4,7 @@
 #
 
 app = 'mochicreator'
-primary_region = 'gru'
+primary_region = 'ewr'
 
 [build]
 
