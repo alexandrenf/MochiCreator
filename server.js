@@ -30,13 +30,23 @@ if (!MCP_AUTH_TOKEN) {
 // ---------------------------------------------------------------------------
 // Mochi API error class
 // ---------------------------------------------------------------------------
+function formatMochiErrors(data) {
+  if (data == null) return "";
+  if (typeof data === "string") return data;
+  if (typeof data !== "object") return String(data);
+  if (Array.isArray(data)) return data.map(formatMochiErrors).filter(Boolean).join(", ");
+  const parts = [];
+  for (const [key, val] of Object.entries(data)) {
+    const formatted = formatMochiErrors(val);
+    parts.push(formatted ? `${key}: ${formatted}` : key);
+  }
+  return parts.join("; ");
+}
+
 class MochiError extends Error {
   constructor(errors, statusCode) {
-    super(
-      Array.isArray(errors)
-        ? errors.join(", ")
-        : Object.values(errors).join(", ")
-    );
+    const message = formatMochiErrors(errors) || `Request failed with status ${statusCode}`;
+    super(message);
     this.errors = errors;
     this.statusCode = statusCode;
     this.name = "MochiError";
