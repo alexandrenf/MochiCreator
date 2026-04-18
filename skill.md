@@ -89,9 +89,11 @@ Contra-indicação renal absoluta da metformina: TFG < {{30}} mL/min.
 **Critical:** Only use indexed clozes (`{{1::}} {{2::}}`) for **comparisons** (X vs Y), not sequential facts. Sequential indexed clozes cause context leakage (revealing one answer gives away the other).
 
 ### 3. Card Titles
-Every card needs a `name` field (title) for searchability:
-- **name**: Short, specific label (e.g., "Metformina - classe", "Light - proteína")
-- **content**: Full formatted card body
+Mochi shows the **first line of `content`** as the card's title in the deck list — make it a clean, specific label.
+- **First line of content**: Short label that reads well in a list (e.g., "Metformina - classe", "Light - proteína")
+- **name** param: Kept as a searchability hint / batch result label; Mochi itself ignores it.
+- For cloze cards, the whole content is one line — that line already serves as the title.
+- For front/back cards, the question line (before `\n\n---\n\n`) is the title.
 
 ### 4. Visual Content Handoff
 Image occlusion requires manual creation. When source describes visuals (ECG, histology, radiology, lesions):
@@ -166,8 +168,8 @@ Use `create_flashcards_batch` for multiple cards (preferred over sequential `cre
 
 Call with:
 
-- **name**: Card title (searchable)
-- **content**: Mochi-formatted markdown:
+- **name**: Searchability hint / batch label (not shown in Mochi — the displayed title is the first line of `content`)
+- **content**: Mochi-formatted markdown (first line becomes the visible card title):
   - Simple cloze: `A metformina é {{biguanida}}.`
   - Indexed cloze: `{{1::CBP}} vs {{2::CEP}}` (comparisons only)
   - Front/back: `Pergunta?\n\n---\n\nResposta` (separator is always `\n\n---\n\n`)
@@ -219,6 +221,6 @@ Match user's language. For Brazilian medical students: Portuguese terminology (e
 3. **Lists** — Never ask "Quais os 3 critérios..." → Test each separately or use mnemonic
 4. **Orphan cards** — Advanced details before basics
 5. **Recognition vs recall** — "Metformina causa acidose lática? Sim" → Use cloze: `Efeito adverso grave da metformina: {{acidose lática}}`
-6. **Missing titles** — Cards without `name` field are unsearchable
+6. **Weak first lines** — Mochi uses the first line of `content` as the card's visible title; vague first lines ("Resposta:", "Conceito") produce unusable deck lists
 7. **Visual descriptions** — Don't describe ECG patterns in text; flag for manual image creation
 8. **Wrong separator** — Front/back separator is always `\n\n---\n\n` (with blank lines on both sides), never `\n---\n`

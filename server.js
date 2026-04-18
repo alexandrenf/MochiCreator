@@ -85,12 +85,11 @@ class MochiClient {
     );
   }
 
-  async createCard({ content, deckId, name, templateId = null, tags, attachments }) {
+  async createCard({ content, deckId, templateId = null, tags, attachments }) {
     const body = {
       content,
       "deck-id": deckId,
       "template-id": templateId,
-      ...(name ? { name } : {}),
       "manual-tags": tags,
     };
     const res = await this.api.post("/cards", body);
